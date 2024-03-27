@@ -1,0 +1,817 @@
+---
+
+
+- name: Instalação Asterisk
+  hosts: all
+  become: yes
+  vars_prompt:
+    - name: init_conf
+      prompt: |
+        O que deseja fazer?
+        
+        1 - Instalação Completa
+        2 - Configurar Hostname
+        3 - Configurar NTP
+        4 - Configurar DNS
+        5 - Criar usuários
+        6 - Instalação Asterisk 
+        7 - Configurar Range de ramais
+        
+                       ***   ATENÇÃO!!!   ***
+        A instalação completa envolve a configuração de:
+          - Hostname
+          - NTP
+          - DNS
+          - PROXY
+          - REPOSITÓRIO APT
+          - CRIAÇÃO DE USUÁRIOS
+          - ASTERISK
+          - ARQUIVOS: pjsip.conf
+                      pjsip.ramais
+                      pjsip.transito 
+
+        A Instalação Asterisk (6) não envolve configuração dos arquivos de configuração: pjsip.conf, extensions.conf e features.conf 
+
+      private: False
+
+  tasks:
+    - name: Acesso à internet
+      ansible.builtin.pause:
+        prompt: O Servidor possui liberação para a internet? (y or n)
+      register: proxy_server
+      when: init_conf == "1" 
+
+    - name: Entroncamento PSTN
+      ansible.builtin.pause:
+        prompt: |
+          Como é realizado o entroncamento com a PSTN?
+            1 - E1 CAS R2 DIGITAL
+            2 - SIP TRUNK
+      register: tronco_pstn
+      when: init_conf == "1" or init_conf == "6"
+      tags: ext
+
+#======= Solicitando Range de ramais
+    - name: Hostname
+      ansible.builtin.pause:
+        prompt: "Qual Hostname pretende atribuir à máquina?"
+      register: hostname
+      when: init_conf == '1' or init_conf == '2' 
+ 
+    
+    - name: Ramal Inicial
+      ansible.builtin.pause:
+        prompt: Qual o primeiro ramal do range?
+      register: first_ramal
+      when: init_conf == "1" or init_conf == "7"     
+
+    - name: Ramal Final
+      ansible.builtin.pause:
+        prompt: Qual o último ramal do range?
+      register: last_ramal
+      when: init_conf == "1" or init_conf == "7"
+
+    - name: Senha de Autenticação
+      ansible.builtin.pause:
+        prompt: Qual a senha de autenticação?
+      register: auth_pass_ramais
+      when: init_conf == "1" 
+
+#================ Informações para configurar extensions.padrao
+    - name: Prefixo OM
+      ansible.builtin.pause:
+        prompt: |
+          Qual o prefixo da OM?
+            (4 dígitos)
+      register: prefix_om
+      when: init_conf == "1"
+      tags: ext
+
+    - name: Prefixo operadora
+      ansible.builtin.pause:
+        prompt: |
+          Qual o prefixo da operadora?
+            (2 dígitos)
+      register: prefix_operadora
+      when: init_conf == "1" 
+      tags: ext
+
+    - name: DDD
+      ansible.builtin.pause:
+        prompt: Qual o DDD da unidade?
+      register: ddd_om
+      when: init_conf == "1" 
+      tags: ext
+
+       
+#================ Solcitando NTP e DNS 
+
+    - name: Server NTP
+      ansible.builtin.pause:
+        prompt: Qual o IP do NTP que deseja atribuir ao Servidor?
+      register: ntp_server_target4
+      when: init_conf == '1' or init_conf == '3'  
+
+    - name: Definindo o IP do NTP
+      ansible.builtin.replace:
+        path: /etc/systemd/timesyncd.conf
+        regexp: "#NTP="
+        replace: "NTP={{ ntp_server_target4.user_input }}"
+      when: init_conf == '1' or init_conf == '3'
+
+    - name: Ajustando horario 
+      ansible.builtin.shell: "timedatectl set-timezone America/Sao_Paulo"     
+      when: init_conf == "1" or init_conf == "3"
+ 
+    - name: DNS
+      ansible.builtin.pause:
+        prompt: Deseja configurar o DNS? (y or n)
+      register: option_dns
+      when: init_conf == "1"
+
+    - name: Server DNS
+      ansible.builtin.pause:
+        prompt: Qual o IP do DNS que deseja atribuir ao Servidor?
+      register: dns_server
+      when: init_conf == "1" and option_dns.user_input == "y" or init_conf == "4"
+      tags: dns_test
+
+    - name: Roteador E1 
+      ansible.builtin.pause:
+        prompt: Qual o IP do roteador E1 com tronco com a operadora?
+      register: ip_gateway_pstn
+      when: init_conf == "1" 
+
+#======= Atribuindo DNS ao Servidor
+
+    - name: Configurando o DNS
+      ansible.builtin.lineinfile:
+        path: /etc/resolv.conf
+        regexp: "nameserver"
+        line: "nameserver {{ dns_server.user_input }}"
+      when: init_conf == "1" and option_dns.user_input == "y" or init_conf == "4"
+      
+
+#=======    Apontando para Proxy APT (10.40.165.215:3142)
+    - block:
+
+        - name: Criando arquivo proxy.conf
+          ansible.builtin.file:
+            path: /etc/apt/apt.conf.d/proxy.conf
+            state: touch
+
+        - name: Apontando repositório
+          ansible.builtin.copy:
+            content: 'Acquire::http::Proxy "http://10.40.165.215:3142";'
+            dest: "/etc/apt/apt.conf.d/proxy.conf"
+
+#=======    Apontando para Proxy WEB
+
+        - name: Configurando Proxy WEB
+          ansible.builtin.blockinfile:
+            path: /etc/environment
+            marker: ""
+            block: |
+              export HTTP_PROXY="10.40.165.215:3128"
+              export HTTPS_PROXY="10.40.165.215:3128"
+              export FTP_PROXY="10.40.165.215:3128"
+              export NO_PROXY="localhost,127.0.0.1,::1"
+
+#======     Apontando para Proxy WGET
+
+        - name: Configurando Proxy WGET
+          ansible.builtin.blockinfile:
+            path: /etc/wgetrc
+            marker: ""
+            block: |
+              https_proxy = 10.40.165.215:3128
+              http_proxy = 10.40.165.215:3128
+              ftp_proxy = 10.40.165.215:3128
+              use_proxy = on
+         
+      when: init_conf == "1" and proxy_server.user_input == "n"
+
+########################################################
+#============== Check de configurações ====================
+    - name: Verificando configuração de DNS
+      ansible.builtin.shell: ping -c 5 www.pame.intraer
+      register: dns_debug
+      when: init_conf == '1' or init_conf == '4'
+
+    - debug:
+        msg: "{{ dns_debug.stdout_lines }}"
+      when: init_conf == '1' or init_conf == '4'
+    
+    - name: Verificando configuração do repositório APT
+      ansible.builtin.apt:
+        name: wget
+        state: latest
+      when: init_conf == "1" 
+
+    - name: Verificando configuração do Proxy
+      ansible.builtin.file:
+        path: /home/teste_proxy
+        state: directory
+      when: init_conf == "1" 
+ 
+    - name: Verificando configuração do Proxy
+      ansible.builtin.shell: wget https://wordpress.org/latest.zip
+      args:
+        chdir: /home/teste_proxy
+      notify: Finalizando verificação
+      when: init_conf == "1" 
+      
+
+#######################################################
+
+
+#======= Criando Usuários para acesso SSH
+
+    - name: Criando usuário para acesso Ansible (User 1)
+      ansible.builtin.user:
+        comment: "PAME User"
+        home: "/home/yurisoaresysob"
+        name: "yurisoaresysob"
+        password: "2zMRB1.3UJHrc"
+        shell: "/bin/bash"
+        group: "sudo"
+      when: init_conf == '1' or init_conf == '5'
+
+    - name: Criando usuário para acesso Ansible (User 2)
+      ansible.builtin.user:
+        comment: "PAME User"
+        home: "/home/ramoslssr"
+        name: "ramoslssr"
+        password: "$y$j9T$XbwGZ1.pDWj2.bYpZ5sIq0$n9.RN/65U1H529EN/tXT.Tp8u.oiLPnTaSNCrXKVlyB"
+        shell: "/bin/bash"
+        group: "sudo"
+      when: init_conf == '1' or init_conf == '5'
+      
+    - name: Criando usuário para acesso Ansible (User 3)
+      ansible.builtin.user:
+        comment: "PAME User"
+        home: "/home/echavesemc"
+        name: "echavesemc"
+        password: "LUXFN.yzbHlRs"
+        shell: "/bin/bash"
+        group: "sudo"
+      when: init_conf == '1' or init_conf == '5'
+
+    - name: Criando usuário para acesso Ansible (User 4) 
+      ansible.builtin.user:
+        comment: "PAME User"
+        home: "/home/ingridibsv"
+        name: "ingridibsv"
+        password: "q7ecfWKeXYKB."
+        shell: "/bin/bash"
+        group: "sudo"
+      when: init_conf == '1' or init_conf == '5'
+
+    - name: alterando grupo dos usuários
+      shell: usermod -aG sudo {{ item }}
+      loop: 
+        - yurisoaresysob
+        - ingridibsv
+        - echavesemc 
+        - ramoslssr
+      when: init_conf == '1' or init_conf == '5'
+
+#======= Alterar Hostname no Target
+
+    - name: Alterando Hostname
+      ansible.builtin.hostname:
+        name: "{{ hostname.user_input }}"
+      when: init_conf == '1' or init_conf == '2'
+
+    - name: Alterando arquivo hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '127.0.1.1'
+        line: 127.0.1.1 {{ hostname.user_input }}
+        owner: root
+        group: root
+      when: init_conf == '1' or init_conf == '2'
+
+#======= Atualizando APT
+
+#    - block:
+
+#        - name: Atualizando pacotes APT
+#          ansible.builtin.apt:
+#            update_cache: yes
+
+#        - name: Atualizando pacotes instalados
+#          ansible.builtin.apt:
+#            upgrade: yes
+#            autoremove: yes
+#        - debug:
+#            msg: "Atualização de pacotes APT bem sucedida!"
+#      when: init_conf == "1" 
+
+#====== Instalação de Pacotes adicionais
+
+    - name: Instalando SNGREP
+      ansible.builtin.apt:
+        name: sngrep
+        state: latest
+      when: init_conf == "1" 
+
+    - name: Instalando NMAP
+      ansible.builtin.apt:
+        name: nmap
+        state: latest
+      when: init_conf == "1" 
+
+    - name: Instalando UNZIP
+      ansible.builtin.apt:
+        name: unzip
+        state: latest
+      when: init_conf == "1" 
+
+    - name: Instalando TREE
+      ansible.builtin.apt:
+        name: tree
+        state: latest
+      when: init_conf == "1" 
+
+#*******************< ASTERISK >**********************************
+
+    - name: Enviando arquivo de configuração do Asterisk compactado
+      ansible.builtin.copy:
+        src: /home/ttag/Documents/Ansible/Files/Asterisk/asterisk-20-current.tar.gz
+        dest: /usr/local/src
+      when: init_conf == '1' or init_conf == '6'      
+
+    - name: Descompactando arquivo
+      ansible.builtin.unarchive:
+        src: /usr/local/src/asterisk-20-current.tar.gz
+        dest: /usr/local/src
+        remote_src: yes
+      when: init_conf == '1' or init_conf == '6'
+
+    - name: Instalando pré-requisitos para ASTERISK
+      shell: ./install_prereq install
+      args:
+        chdir: /usr/local/src/asterisk-20.4.0/contrib/scripts/
+      when: init_conf == '1' or init_conf == '6'
+
+    - name: Reiniciando Servidor Remoto
+      ansible.builtin.reboot:
+        reboot_timeout: 300
+        post_reboot_delay: 180
+        test_command: whoami
+      when: init_conf == '1' or init_conf == '6'
+
+    - name: Aguardando servidor ficar disponivel
+      wait_for_connection:
+        timeout: 600
+      when: init_conf == '1' or init_conf == '6'
+
+    - name: Instalando ASTERISK ...
+      shell: ./configure
+      args:
+        chdir: /usr/local/src/asterisk-20.4.0
+      when: init_conf == '1' or init_conf == '6' 
+
+    - name: Habilitando Menuselect
+      shell: make menuselect.makeopts
+      args:
+        chdir: /usr/local/src/asterisk-20.4.0
+      when: init_conf == '1' or init_conf == '6'
+
+    - name: Habilitando H323
+      shell: menuselect/menuselect --enable chan_ooh323 menuselect.makeopts
+      args:
+        chdir: /usr/local/src/asterisk-20.4.0
+      when: init_conf == '1' or init_conf == '6' 
+
+    - name: Habilitando OPUS Codec
+      shell: menuselect/menuselect --enable codec_opus menuselect.makeopts
+      args:
+        chdir: /usr/local/src/asterisk-20.4.0
+      when: init_conf == '1' or init_conf == '6' 
+
+    - name: Salvando configuração 1/3
+      shell: make
+      args:
+        chdir: /usr/local/src/asterisk-20.4.0
+      when: init_conf == '1' or init_conf == '6' 
+
+    - name: Salvando configuração 2/3
+      shell: make install
+      args:
+        chdir: /usr/local/src/asterisk-20.4.0
+      when: init_conf == '1' or init_conf == '6' 
+
+    - name: Salvando configuração 3/3
+      shell: make config
+      args:
+        chdir: /usr/local/src/asterisk-20.4.0
+      when: init_conf == '1' or init_conf == '6' 
+
+    - name: :Sobrescrição do arquivo de Log
+      shell: make install-logrotate
+      args:
+        chdir: /usr/local/src/asterisk-20.4.0
+      when: init_conf == '1' or init_conf == '6' 
+
+    - name: Inicializar serviço do Asterisk
+      shell: systemctl restart asterisk
+      when: init_conf == '1' or init_conf == '6' 
+
+    - name: Instalando Samples
+      shell: make samples
+      args:
+        chdir: /usr/local/src/asterisk-20.4.0
+      when: init_conf == '1' or init_conf == '6' 
+
+    - name: Reiniciando Servidor Remoto
+      ansible.builtin.reboot:
+        reboot_timeout: 300
+        post_reboot_delay: 100
+        test_command: whoami
+      when: init_conf == '1' or init_conf == '6' 
+
+#======= Instalação do pacote de Áudio
+
+    - name: Criando diretório
+      ansible.builtin.file:
+        path: /var/lib/asterisk/sounds/pt-br
+        state: directory
+      when: init_conf == '1' or init_conf == '6' 
+
+    - name: Enviando arquivo de áudio
+      ansible.builtin.copy:
+        src: /home/ttag/Documents/Ansible/Files/Asterisk/asterisk-sounds-core-pt-BR-3.8.3.zip
+        dest: /var/lib/asterisk/sounds/pt-br
+      when: init_conf == '1' or init_conf == '6' 
+
+    - name: Extraindo Arquivo de Áudio na pasta
+      ansible.builtin.unarchive:
+        src:  /var/lib/asterisk/sounds/pt-br/asterisk-sounds-core-pt-BR-3.8.3.zip
+        dest: /var/lib/asterisk/sounds/pt-br
+        remote_src: yes
+      when: init_conf == '1' or init_conf == '6' 
+
+    - name: Instalação finalizada
+      ansible.builtin.debug:
+        msg: "Instalação Bem-sucedida! "
+      when: init_conf == '1' or init_conf == '6' 
+
+#======= Adicionais
+    - name: Copiando arquivo PJSIP
+      ansible.builtin.copy:
+        src: /etc/asterisk/pjsip.conf
+        dest: /etc/asterisk/pjsip.sample
+        remote_src: yes
+      when: init_conf == '1' 
+
+    - name: Criando arquivo PJSIP padrão
+      ansible.builtin.copy:
+        content: |
+          [transport-udp]
+          type=transport
+          protocol=udp
+          bind=0.0.0.0
+
+          ;============== Inclusão dos ramais
+          #include <pjsip.ramais>
+
+          ;============== Inclusão dos Troncos
+
+          #include <pjsip.transito>         
+
+        dest: /etc/asterisk/pjsip.conf 
+      when: init_conf == '1'  
+
+
+    - name: Incluindo rte1 no pjsip.conf
+      ansible.builtin.lineinfile:
+        path: /etc/asterisk/pjsip.conf
+        line: '#include <pjsip.rte1>'
+      when: init_conf == '1' and tronco_pstn.user_input == "1"
+
+
+    - name: Incluindo pstn sip trunk no pjsip.conf
+      ansible.builtin.lineinfile:
+        path: /etc/asterisk/pjsip.conf
+        line: '#include <pjsip.pstn>'
+      when: init_conf == '1' and tronco_pstn.user_input == "2"
+
+    - block:
+
+        - name: Criando Template do arquivo pjsip.ramais
+          ansible.builtin.blockinfile:
+            path: /etc/asterisk/pjsip.ramais
+            marker: ""
+            block: |
+              ;================ Templates
+
+              [endpoint](!)
+              type=endpoint
+              context=ramais
+              disallow=all
+              allow=opus
+              allow=g722
+              allow=alaw
+              allow=h264
+              language=pt_BR
+
+              [auth](!)
+              type=auth
+              auth_type=userpass
+              password={{ auth_pass_ramais.user_input }}
+
+              [aor](!)
+              type=aor
+              max_contacts=2
+              qualify_frequency=300
+
+            create: true
+          when: init_conf == "1" 
+
+
+        - name: Criando Template do arquivo pjsip.transito
+          ansible.builtin.blockinfile:
+            path: /etc/asterisk/pjsip.transito
+            marker: ""
+            block: | 
+              ;=============== Tronco com Transito CINDACTA 1
+
+              [c1transito]
+              type=aor
+              contact=sip:10.227.11.222:5060
+              qualify_frequency=300
+
+              [c1transito]
+              type=endpoint
+              context=ramais
+              disallow=all
+              allow=opus
+              allow=alaw
+              aors=c1transito
+
+              [c1transito]
+              type=identify
+              endpoint=c1transito
+              match=10.227.11.222
+
+              ;=============== Tronco com Transito PAME-RJ
+
+              [pametransito]
+              type=aor
+              contact=sip:10.40.165.222:5060
+              qualify_frequency=300
+
+              [pametransito]
+              type=endpoint
+              context=ramais
+              disallow=all
+              allow=opus
+              allow=alaw
+              aors=pametransito
+
+              [pametransito]
+              type=identify
+              endpoint=pametransito
+              match=10.40.165.222
+            create: true
+          when: init_conf == "1" 
+
+
+#============= Criação do Arquivo PJSIP para PSTN
+
+    - name: Criando template para arquivo pjsip.rte1
+      ansible.builtin.blockinfile:
+        path: /etc/asterisk/pjsip.rte1
+        marker: ""
+        block: |
+          ;============== Tronco com Roteador
+
+          [rte1]
+          type=aor
+          contact=sip:{{ ip_gateway_pstn.user_input }}:5060
+          qualify_frequency=300
+
+          [rte1]
+          type=endpoint
+          context=ramais
+          disallow=all
+          allow=alaw
+          allow=ulaw
+          aors=rte1
+
+          [rte1]
+          type=identify
+          endpoint=rte1
+          match={{ ip_gateway_pstn.user_input }}
+        
+        create: True
+      when: init_conf == "1" and tronco_pstn.user_input == '1'
+
+
+
+
+##########################################################
+# EDITANDO
+########################################################
+
+
+
+    - name: Criando template para arquivo pjsip.pstn
+      ansible.builtin.blockinfile:
+        path: /etc/asterisk/pjsip.pstn
+        marker: ""
+        block: |
+          ;============== Tronco com Operadora
+
+          [pstn]
+          type=aor
+          contact=sip:{{ ip_gateway_pstn.user_input }}:5060
+          qualify_frequency=300
+
+          [pstn]
+          type=endpoint
+          context=ramais
+          disallow=all
+          allow=alaw
+          allow=ulaw
+          aors=pstn
+
+          [pstn]
+          type=identify
+          endpoint=pstn
+          match={{ ip_gateway_pstn.user_input }}
+        
+        create: True
+      when: init_conf == "1" and tronco_pstn.user_input == '2'
+
+
+#============== Criando Range de Ramais
+
+    - name: Criando título do Range
+      ansible.builtin.blockinfile:
+        path: /etc/asterisk/pjsip.ramais
+        marker: ""
+        block: |
+          ; =========== DDR {{ first_ramal.user_input }} - {{ last_ramal.user_input }}
+        create: True
+      when: init_conf == "1" or init_conf == "7"
+ 
+
+    - name: Criando Range de ramais
+      ansible.builtin.blockinfile:
+        path: /etc/asterisk/pjsip.ramais
+        marker: ""
+        block: |
+          [{{ item }}](endpoint)
+          auth={{ item }}
+          aors={{ item }}
+          call_group =
+          pickup_group =
+
+          [{{ item }}](auth)
+          username={{ item }}
+
+          [{{ item }}](aor)
+      loop: "{{ range( first_ramal.user_input|int, last_ramal.user_input|int + 1) | list }}"
+      when: init_conf == "1" or init_conf == "7"
+
+#=============== CONFIGURAÇÃO DOS EXTENSIONS =================
+#====== EXTENSIONS CONF
+    - name: fazendo backup do extensions.conf
+      ansible.builtin.copy:
+        src: /etc/asterisk/extensions.conf
+        dest: /etc/asterisk/extensions.samples
+        remote_src: yes
+      when: init_conf == "1"
+
+    - name: Configurando extensions.conf
+      ansible.builtin.copy:
+        content: |
+          [ramais]
+
+          #include <extensions.padrao>
+
+          #include <extensions.ramais>
+        dest: /etc/asterisk/extensions.conf
+      when: init_conf == '1'
+
+    
+#====== EXTENSIONS PADRÃO
+    - name: criando e configurando extensions.padrao
+      ansible.builtin.blockinfile:
+        path: /etc/asterisk/extensions.padrao
+        marker: ''
+        block: |
+          ;========================= DIALPLAN PADRÃO
+
+          ;!!!! Adicionar CONTEXTO "[ramais]" em linha anterior
+
+          ;#include <extensions.padrao>
+
+          ;========== LIGAÇÕES LOCAIS FIXO
+
+
+          exten => _0ZXXXXXXX,1,Set(CALLERID(ALL)={{ prefix_om.user_input }}${CALLERID(num)})
+          exten => _0ZXXXXXXX,2,dial(pjsip/0{{ ddd_om.user_input  }}${EXTEN:1}@c1transito)
+          exten => _0ZXXXXXXX,3,dial(pjsip/0{{ ddd_om.user_input }}${EXTEN:1}@pametransito)
+          exten => _0ZXXXXXXX,4,dial(pjsip/0${EXTEN:1}@<TRUNK>)
+
+
+          ;========== LIGAÇÕES LOCAIS MÓVEL
+
+          exten => _0ZXXXXXXXX,1,Set(CALLERID(ALL)={{ prefix_om.user_input }}${CALLERID(num)})
+          exten => _0ZXXXXXXXX,2,dial(pjsip/0${EXTEN:1}@<TRUNK>)
+
+          ;========== LIGAÇÕES DDD
+
+          exten => _00Z.,1,Set(CALLERID(ALL)=0{{ ddd_om.user_input }}{{ prefix_om.user_input }}${CALLERID(num)})
+          exten => _00Z.,2,dial(pjsip/${EXTEN:1}@c1transito)
+          exten => _00Z.,3,dial(pjsip/${EXTEN:1}@pametransito)
+          exten => _00Z.,4,dial(pjsip/00{{ prefix_operadora.user_input }}${EXTEN:2}@<TRUNK>)
+
+          ;========== LIGAÇÕES DDI
+
+          exten => _000X.,1,dial(pjsip/00{{ prefix_operadora.user_input }}${EXTEN:3}@<TRUNK>)
+
+          ;========== LIGAÇÕES EMERGENCIAIS
+
+          exten => _01XX,1,dial(pjsip/${EXTEN:1}@<TRUNK>)
+
+          ;========== LIGAÇÕES 0800
+
+          exten => _00800X.,1,dial(pjsip/${EXTEN:1}@<TRUNK>)
+
+          ;========== LIGAÇÕES DE UTILIDADE ESPECÍFICA
+
+          exten => _01XXXX,1,dial(pjsip/${EXTEN:1}@<TRUNK>)
+
+          ;==================== Pickup - Captura de chamada direta
+
+          exten => _**XXXX,1,Pickup(${EXTEN:2})
+
+        create: True
+      when: init_conf == '1'
+      tags: ext
+
+    - name: Tronco E1
+      ansible.builtin.replace:
+        path: /etc/asterisk/extensions.padrao
+        regexp: '<TRUNK>'
+        replace: 'rte1'
+      when: init_conf == '1' and tronco_pstn.user_input == '1'
+      tags: ext
+
+    - name: Tronco E1
+      ansible.builtin.replace:
+        path: /etc/asterisk/extensions.padrao
+        regexp: '<TRUNK>'
+        replace: 'pstn'
+      when: init_conf == '1' and tronco_pstn.user_input == '2'
+      tags: ext
+
+
+#====== EXTENSIONS RAMAIS
+
+
+
+
+#============== Configuração de facilidades
+
+ 
+    - name: Realizando Backup de features.conf
+      ansible.builtin.copy:
+        src: /etc/asterisk/features.conf
+        dest: /etc/asterisk/features.sample
+        remote_src: yes
+      tags: feature
+      when: init_conf == "1" 
+
+    - name: Configurando facilidades
+      ansible.builtin.copy:
+        content: |
+          [general]
+
+                  featuredigittimeout = 5000
+                  transferdigittimeout = 5
+                  pickupexten = **
+
+          [featuremap]
+
+                  blindxfer = #
+                  disconnect = *0
+                  atxfer = *#
+
+        dest: /etc/asterisk/features.conf
+      when: init_conf == "1" 
+
+  handlers:
+    - name: Finalizando verificação
+      ansible.builtin.file:
+        path: /home/teste_proxy
+        state: absent 
+      when: init_conf == "1" 
+
+
+...
